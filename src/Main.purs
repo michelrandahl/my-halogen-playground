@@ -1,0 +1,262 @@
+module Main where
+
+import Prelude
+
+import Control.Monad.Rec.Class (forever)
+import Data.Array (range)
+import Data.Maybe (Maybe(..))
+import Data.String as String
+import Effect (Effect)
+import Effect.Aff (Milliseconds(..))
+import Effect.Aff as Aff
+import Effect.Aff.Class (class MonadAff)
+import Effect.Class.Console (log)
+import Effect.Random (randomInt)
+import Halogen as H
+import Halogen.Aff as HA
+import Halogen.HTML as HH
+import Halogen.HTML.Events as HE
+import Halogen.HTML.Properties as HP
+import Halogen.Query.Event (eventListener)
+import Halogen.Subscription as HS
+import Halogen.VDom.Driver (runUI)
+import Type.Prelude (Proxy(..))
+import Web.Event.Event as E
+import Web.HTML (window)
+import Web.HTML.HTMLDocument as HTMLDocument
+import Web.HTML.Window (document)
+import Web.UIEvent.KeyboardEvent as KE
+import Web.UIEvent.KeyboardEvent.EventTypes as KET
+
+main :: Effect Unit
+main = HA.runHalogenAff do
+  body <- HA.awaitBody
+  io <- runUI component unit body
+
+  void $ H.liftEffect $ HS.subscribe io.messages \(BToggled newState) -> do
+    H.liftEffect $ log $ "Button was internally toggled to: " <> show newState
+    pure Nothing
+  state0 <- io.query $ H.mkRequest IsOn
+
+  H.liftEffect $ log $ "The button state is currently: " <> show state0
+  void $ io.query $ H.mkTell (SetState true)
+
+  state1 <- io.query $ H.mkRequest IsOn
+  H.liftEffect $ log $ "The button state is now: " <> show state1
+
+data Query a
+  = IsOn (Boolean -> a)
+  | SetState Boolean a
+
+data Output = BToggled Boolean
+
+data Action
+  = Increment
+  | Decrement
+  | RandomPlus
+  | RandomMinus
+  | Initialize
+  | Finalize
+  | Tick
+  | HandleKey H.SubscriptionId KE.KeyboardEvent
+  | HandleChildButton ButtonOutput
+  | TellChildButton
+  | RequestChildButton
+  | Toggle
+
+timer :: forall m a. MonadAff m => a -> m (HS.Emitter a)
+timer val = do
+  { emitter, listener } <- H.liftEffect HS.create
+  _ <- H.liftAff $ Aff.forkAff $ forever do
+    Aff.delay $ Milliseconds 1000.0
+    H.liftEffect $ HS.notify listener val
+  pure emitter
+
+type State =
+  { chars   :: String
+  , count   :: Int
+  , enabled :: Boolean
+  }
+
+type Slots = ( button :: H.Slot ButtonQuery ButtonOutput Unit )
+
+_button = Proxy :: Proxy "button"
+
+component :: forall input m. MonadAff m => H.Component Query input Output m
+component =
+  H.mkComponent
+    { initialState
+    , render
+    , eval: H.mkEval $ H.defaultEval
+      { handleAction = handleAction
+      , handleQuery  = handleQuery
+      , initialize   = Just Initialize
+      , finalize     = Just Finalize
+      }
+    }
+  where
+  initialState :: input -> State
+  initialState _ = {count : 0, chars : "", enabled : false}
+
+  render :: State -> H.ComponentHTML Action Slots m
+  render {count,chars,enabled} =
+    HH.div_
+      [ element
+      , HH.div_ []
+      , HH.button [HE.onClick (const Toggle)] [ HH.text $ "special button: " <> show enabled ]
+      -- underscore suffix can in some cases be used when we don't have any attributes
+      , HH.div_ [ HH.text chars ]
+      , HH.button [ HE.onClick (const Decrement) ] [ HH.text "-" ]
+      , HH.button [ HE.onClick (const RandomMinus) ] [ HH.text "random-minus" ]
+      , HH.div_ [ HH.text $ show count ]
+      , HH.button [ HE.onClick (const Increment) ] [ HH.text "+" ]
+      , HH.button [ HE.onClick (const RandomPlus) ] [ HH.text "random-plus" ]
+      , htmlExample
+      , HH.div_ [ HH.slot _button unit myButton count  HandleChildButton ]
+      , HH.button [ HE.onClick (const TellChildButton) ] [ HH.text "tell child button" ]
+      , HH.button [ HE.onClick (const RequestChildButton) ] [ HH.text "request child button" ]
+      , HH.div_ [ ]
+      , mySelect
+      ]
+
+  handleQuery :: forall a. Query a -> H.HalogenM State Action Slots Output m (Maybe a)
+  handleQuery = case _ of
+    IsOn reply -> do
+      log "IsOn"
+      enabled <- H.gets _.enabled
+      pure $ Just $ reply enabled
+
+    SetState enabled a -> do
+      log "SetState"
+      H.modify_ (_ {enabled = enabled})
+      pure $ Just a
+
+  handleAction :: Action -> H.HalogenM State Action Slots Output m Unit
+  handleAction = case _ of
+    Initialize -> do
+      _ <- H.subscribe =<< timer Tick
+      handleAction RandomPlus
+      document <- H.liftEffect $ document =<< window
+      H.subscribe' \sid ->
+        eventListener
+          KET.keyup
+          (HTMLDocument.toEventTarget document)
+          (map (HandleKey sid) <<< KE.fromEvent)
+
+    Increment -> H.modify_ \state -> state {count = state.count + 1}
+
+    Decrement -> H.modify_ \state -> state {count = state.count - 1}
+
+    RandomMinus -> do
+      newNumber <- H.liftEffect $ randomInt 1 100
+      H.modify_ \state -> state {count = state.count - newNumber}
+
+    RandomPlus  -> do
+      newNumber <- H.liftEffect $ randomInt 1 100
+      H.modify_ \state -> state {count = state.count + newNumber}
+
+    Finalize -> do
+      number <- H.get
+      log $ "finalized, last number: " <> show number
+
+    Tick -> handleAction Increment
+
+    HandleKey sid ev
+      | KE.shiftKey ev -> do
+        H.liftEffect $ E.preventDefault $ KE.toEvent ev
+        let char = KE.key ev
+        when (String.length char == 1) do
+          H.modify_ \st -> st {chars = st.chars <> char}
+      | KE.key ev == "Enter" -> do
+        H.liftEffect $ E.preventDefault $ KE.toEvent ev
+        H.modify_ _ { chars = "" }
+        H.unsubscribe sid
+      | otherwise -> pure unit
+
+    HandleChildButton Clicked -> do
+      log "child button click registered at parent"
+      H.modify_ (\state -> state { count = state.count + 1000 })
+    
+    TellChildButton -> do
+      H.tell _button unit IncButton
+
+    RequestChildButton -> do
+      childButtonVal <- H.request _button unit GetButtonVal
+      case childButtonVal of
+        Just v -> H.modify_ (\state -> state { count = v })
+        Nothing -> pure unit
+
+    Toggle -> do
+      newState <- H.modify \st -> st { enabled = not st.enabled }
+      H.raise $ BToggled newState.enabled
+
+element :: forall w2 i3. HH.HTML w2 i3
+element = HH.h1 [ ] [ HH.text "Hello, world!" ]
+
+mySelect :: forall w2 i3. HH.HTML w2 i3
+mySelect =
+  HH.select
+    [ HP.multiple true ]
+    (range 1 3 <#> mkOption)
+  where
+    mkOption :: Int -> _
+    mkOption n = HH.option [ HP.value $ "stuff" <> (show n) ] [ HH.text $ "stuff" <> show n ]
+
+htmlExample :: forall w2 i3. HH.HTML w2 i3
+htmlExample =
+  HH.div
+    [ HP.id "root" ]
+    [ HH.input
+        [ HP.placeholder "Name" ]
+    , HH.button
+        [ HP.classes [ HH.ClassName "btn-primary" ]
+        , HP.type_ HP.ButtonSubmit
+        ]
+        [ HH.text "Submit" ]
+    ]
+
+-- TODO create a module for this so we have a proper example to follow later
+-- also create something like `type ButtonSlot = H.Slot ButtonQuery ButtonOutput` that we can use in the parent
+data ButtonOutput = Clicked
+type ButtonInput = Int
+type ButtonState = { val :: Int }
+data ButtonAction
+  = Receive ButtonInput
+  | Click
+data ButtonQuery a
+  = IncButton a
+  | GetButtonVal (Int -> a)
+
+myButton :: forall m. MonadAff m => H.Component ButtonQuery ButtonInput ButtonOutput m
+myButton =
+  H.mkComponent
+    { initialState
+    , render
+    , eval : H.mkEval $ H.defaultEval
+      { handleAction = handleAction
+      , handleQuery = handleQuery
+      , receive = Just <<< Receive
+      }
+    }
+  where
+  initialState :: ButtonInput -> ButtonState
+  initialState input = { val : input}
+
+  render { val } = HH.button [ HE.onClick (const Click)] [ HH.text $ show val ]
+
+  handleAction = case _ of
+    Receive input ->
+      H.modify_ _ { val = input }
+    Click -> do
+      log "child button was clicked"
+      H.raise Clicked
+
+  handleQuery :: forall action a. ButtonQuery a -> H.HalogenM ButtonState action () ButtonOutput m (Maybe a)
+  handleQuery = case _ of
+    IncButton a -> do
+      H.modify_ \state -> state { val = state.val + 1337}
+      pure $ Just a
+
+    GetButtonVal reply -> do
+      { val } <- H.get
+      pure $ Just $ reply val
