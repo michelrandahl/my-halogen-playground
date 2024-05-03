@@ -93,6 +93,7 @@
             # setting up symlink for `purescript-language-server` such that neovim LSP might find it
             DEV_BIN=$(pwd)/dev-bin
             PURESCRIPT_LANGUAGE_SERVER=$DEV_BIN/purescript-language-server
+            mkdir -p $DEV_BIN
             ln -fs $(pwd)/node_modules/purescript-language-server/server.js $PURESCRIPT_LANGUAGE_SERVER
             # adding ./dev-bin to PATH such that neovim LSP will be able to find the LSP server
             export PATH=$DEV_BIN:$PATH

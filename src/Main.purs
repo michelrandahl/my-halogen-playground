@@ -73,6 +73,7 @@ data Action
   | RequestChildButton
   | Toggle
   | HandleWorkerOutput MyWorker.Output
+  | HandleHelixStateOutput HelixState.Output
 
 timer :: forall m a. MonadAff m => a -> m (HS.Emitter a)
 timer val = do
@@ -91,7 +92,7 @@ type State =
 
 type Slots =
   ( button :: H.Slot MyButton.Query MyButton.Output Unit
-  , helixCounter  :: forall o. H.Slot HelixState.Query o Unit
+  , helixCounter  :: H.Slot HelixState.Query HelixState.Output Unit
   , helixCounterAdd :: forall q o. H.Slot q o Unit
   , helixCounterSub :: forall q o. H.Slot q o Unit
   )
@@ -134,14 +135,14 @@ component =
       , HH.button [ HE.onClick (const RandomMinus) ] [ HH.text "random-minus" ]
       , HH.div_ [ HH.text $ show count ]
       , HH.button [ HE.onClick (const Increment) ] [ HH.text "+" ]
-      , HH.button [ HE.onClick (const RandomPlus) ] [ HH.text "random-plus" ]
+      , HH.button [ HE.onClick (const RandomPlus) ] [ HH.text "random-plus (using web-worker)" ]
       , htmlExample
       , HH.div_ [ HH.slot _button unit myButton count  HandleChildButton ]
       , HH.button [ HE.onClick (const TellChildButton) ] [ HH.text "tell child button" ]
       , HH.button [ HE.onClick (const RequestChildButton) ] [ HH.text "request child button" ]
       , HH.div_ [ ]
       , mySelect
-      , HH.slot_ _helixCounter unit helixCounter unit
+      , HH.slot _helixCounter unit helixCounter unit HandleHelixStateOutput
       , HH.slot_ _helixCounterAdd unit helixCounterAdd unit
       , HH.slot_ _helixCounterSub unit helixCounterSub unit
       ]
@@ -240,6 +241,9 @@ component =
       log $ "got res from worker " <> show res
       H.modify_ \state -> state {count = state.count + res}
     HandleWorkerOutput (MyWorker.MultRes res) -> pure unit
+
+    HandleHelixStateOutput o -> do
+      log $ "got result from HelixState component: " <> show o
 
 element :: forall w2 i3. HH.HTML w2 i3
 element = HH.h1 [ ] [ HH.text "Hello, world!" ]

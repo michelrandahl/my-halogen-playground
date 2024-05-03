@@ -38,12 +38,30 @@ type Input = Unit
 data Query a
   = QueryInitialize Int a
 
+data Output
+  = Result Int
+derive instance Generic Output _
+instance Show Output where
+  show = genericShow
+
 useCounter :: forall ctx m. MonadAff m => Eq ctx => UseHelixHook State Action ctx m
 useCounter = makeStore "counter" reducer 0 middlewareStack
 
-helixCounter :: forall o m. MonadAff m => H.Component Query Input o m
-helixCounter = Hooks.component \(tokens :: ComponentTokens Query _ o) input -> Hooks.do
+helixCounter :: forall m. MonadAff m => H.Component Query Input Output m
+helixCounter = Hooks.component \(tokens :: ComponentTokens Query _ Output) input -> Hooks.do
   (Tuple (state :: Int) ctx) <- useCounter identity
+
+  -- react to initialize and destroy
+  Hooks.useLifecycleEffect do
+    log "helixCounter initialized"
+    pure $ Just do
+      log "helixCounter destroyed"
+
+  -- if captures is empty then it will react to every render of the component
+  Hooks.captures {state} Hooks.useTickEffect do
+    Hooks.raise tokens.outputToken (Result state)
+    pure Nothing
+
   Hooks.useQuery tokens.queryToken \query -> case query of
     QueryInitialize i a -> do
       ctx.dispatch $ Initialize i
