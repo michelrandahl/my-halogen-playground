@@ -4,8 +4,10 @@ import Prelude
 
 import Control.Monad.Rec.Class (forever)
 import Data.Array (range)
+import Data.Foldable (for_)
 import Data.Maybe (Maybe(..))
 import Data.String as String
+import Data.Tuple (Tuple(..))
 import Effect (Effect)
 import Effect.Aff (Milliseconds(..))
 import Effect.Aff as Aff
@@ -20,6 +22,12 @@ import Halogen.HTML.Properties as HP
 import Halogen.Query.Event (eventListener)
 import Halogen.Subscription as HS
 import Halogen.VDom.Driver (runUI)
+import HelixState (helixCounter, helixCounterAdd, helixCounterSub, useCounter)
+import HelixState as HelixState
+import MyButton (myButton)
+import MyButton as MyButton
+import MyWorker (MyWorker, handleWorkerOutput, mkWorker, sendToWorker)
+import MyWorker as MyWorker
 import Type.Prelude (Proxy(..))
 import Web.Event.Event as E
 import Web.HTML (window)
@@ -27,6 +35,7 @@ import Web.HTML.HTMLDocument as HTMLDocument
 import Web.HTML.Window (document)
 import Web.UIEvent.KeyboardEvent as KE
 import Web.UIEvent.KeyboardEvent.EventTypes as KET
+
 
 main :: Effect Unit
 main = HA.runHalogenAff do
@@ -59,10 +68,11 @@ data Action
   | Finalize
   | Tick
   | HandleKey H.SubscriptionId KE.KeyboardEvent
-  | HandleChildButton ButtonOutput
+  | HandleChildButton MyButton.Output
   | TellChildButton
   | RequestChildButton
   | Toggle
+  | HandleWorkerOutput MyWorker.Output
 
 timer :: forall m a. MonadAff m => a -> m (HS.Emitter a)
 timer val = do
@@ -76,11 +86,20 @@ type State =
   { chars   :: String
   , count   :: Int
   , enabled :: Boolean
+  , myWorker :: Maybe MyWorker
   }
 
-type Slots = ( button :: H.Slot ButtonQuery ButtonOutput Unit )
+type Slots =
+  ( button :: H.Slot MyButton.Query MyButton.Output Unit
+  , helixCounter  :: forall o. H.Slot HelixState.Query o Unit
+  , helixCounterAdd :: forall q o. H.Slot q o Unit
+  , helixCounterSub :: forall q o. H.Slot q o Unit
+  )
 
 _button = Proxy :: Proxy "button"
+_helixCounter = Proxy :: Proxy "helixCounter"
+_helixCounterAdd = Proxy :: Proxy "helixCounterAdd"
+_helixCounterSub = Proxy :: Proxy "helixCounterSub"
 
 component :: forall input m. MonadAff m => H.Component Query input Output m
 component =
@@ -96,7 +115,12 @@ component =
     }
   where
   initialState :: input -> State
-  initialState _ = {count : 0, chars : "", enabled : false}
+  initialState _ =
+    { count : 0
+    , chars : ""
+    , enabled : false
+    , myWorker : Nothing
+    }
 
   render :: State -> H.ComponentHTML Action Slots m
   render {count,chars,enabled} =
@@ -117,6 +141,9 @@ component =
       , HH.button [ HE.onClick (const RequestChildButton) ] [ HH.text "request child button" ]
       , HH.div_ [ ]
       , mySelect
+      , HH.slot_ _helixCounter unit helixCounter unit
+      , HH.slot_ _helixCounterAdd unit helixCounterAdd unit
+      , HH.slot_ _helixCounterSub unit helixCounterSub unit
       ]
 
   handleQuery :: forall a. Query a -> H.HalogenM State Action Slots Output m (Maybe a)
@@ -134,6 +161,22 @@ component =
   handleAction :: Action -> H.HalogenM State Action Slots Output m Unit
   handleAction = case _ of
     Initialize -> do
+      H.tell _helixCounter unit $ HelixState.QueryInitialize 42
+
+      myWorker <- H.liftEffect mkWorker
+      { emitter, listener } <- H.liftEffect HS.create
+      H.liftEffect $ handleWorkerOutput myWorker $
+        case _ of
+          Just output -> do
+            log $ "got output from worker " <> show output
+            HS.notify listener $ HandleWorkerOutput output
+          _ -> log $ "invalid output from worker"
+      _ <- H.subscribe emitter
+      -- testing that the worker can receive input
+      H.liftEffect $
+        sendToWorker myWorker $ MyWorker.Hello $ MyWorker.Msg "msg from main"
+      H.modify_ _ {myWorker = Just myWorker}
+
       _ <- H.subscribe =<< timer Tick
       handleAction RandomPlus
       document <- H.liftEffect $ document =<< window
@@ -152,12 +195,15 @@ component =
       H.modify_ \state -> state {count = state.count - newNumber}
 
     RandomPlus  -> do
+      state <- H.get
       newNumber <- H.liftEffect $ randomInt 1 100
-      H.modify_ \state -> state {count = state.count + newNumber}
+      for_ state.myWorker \w -> do
+        H.liftEffect $
+          sendToWorker w $ MyWorker.AddNumbers $ Tuple newNumber state.count
 
     Finalize -> do
-      number <- H.get
-      log $ "finalized, last number: " <> show number
+      count <- H.gets \s -> s.count
+      log $ "finalized, last count: " <> show count
 
     Tick -> handleAction Increment
 
@@ -173,15 +219,15 @@ component =
         H.unsubscribe sid
       | otherwise -> pure unit
 
-    HandleChildButton Clicked -> do
+    HandleChildButton MyButton.Clicked -> do
       log "child button click registered at parent"
       H.modify_ (\state -> state { count = state.count + 1000 })
     
     TellChildButton -> do
-      H.tell _button unit IncButton
+      H.tell _button unit (MyButton.IncButton 42)
 
     RequestChildButton -> do
-      childButtonVal <- H.request _button unit GetButtonVal
+      childButtonVal <- H.request _button unit MyButton.GetButtonVal
       case childButtonVal of
         Just v -> H.modify_ (\state -> state { count = v })
         Nothing -> pure unit
@@ -189,6 +235,11 @@ component =
     Toggle -> do
       newState <- H.modify \st -> st { enabled = not st.enabled }
       H.raise $ BToggled newState.enabled
+
+    HandleWorkerOutput (MyWorker.AddRes res) -> do
+      log $ "got res from worker " <> show res
+      H.modify_ \state -> state {count = state.count + res}
+    HandleWorkerOutput (MyWorker.MultRes res) -> pure unit
 
 element :: forall w2 i3. HH.HTML w2 i3
 element = HH.h1 [ ] [ HH.text "Hello, world!" ]
@@ -214,49 +265,3 @@ htmlExample =
         ]
         [ HH.text "Submit" ]
     ]
-
--- TODO create a module for this so we have a proper example to follow later
--- also create something like `type ButtonSlot = H.Slot ButtonQuery ButtonOutput` that we can use in the parent
-data ButtonOutput = Clicked
-type ButtonInput = Int
-type ButtonState = { val :: Int }
-data ButtonAction
-  = Receive ButtonInput
-  | Click
-data ButtonQuery a
-  = IncButton a
-  | GetButtonVal (Int -> a)
-
-myButton :: forall m. MonadAff m => H.Component ButtonQuery ButtonInput ButtonOutput m
-myButton =
-  H.mkComponent
-    { initialState
-    , render
-    , eval : H.mkEval $ H.defaultEval
-      { handleAction = handleAction
-      , handleQuery = handleQuery
-      , receive = Just <<< Receive
-      }
-    }
-  where
-  initialState :: ButtonInput -> ButtonState
-  initialState input = { val : input}
-
-  render { val } = HH.button [ HE.onClick (const Click)] [ HH.text $ show val ]
-
-  handleAction = case _ of
-    Receive input ->
-      H.modify_ _ { val = input }
-    Click -> do
-      log "child button was clicked"
-      H.raise Clicked
-
-  handleQuery :: forall action a. ButtonQuery a -> H.HalogenM ButtonState action () ButtonOutput m (Maybe a)
-  handleQuery = case _ of
-    IncButton a -> do
-      H.modify_ \state -> state { val = state.val + 1337}
-      pure $ Just a
-
-    GetButtonVal reply -> do
-      { val } <- H.get
-      pure $ Just $ reply val

@@ -13,3 +13,4 @@
 dev-bin/*
 .parcel-cache/*
 dist/*
+dev/*.js
